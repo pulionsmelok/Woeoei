@@ -1,3 +1,5 @@
+'use strict';
+
 const fs = require('fs');
 const { Cookie } = require('tough-cookie');
 
@@ -6,128 +8,129 @@ function loadBrowserCookies(cookiePath) {
     throw new Error(`Cookie file not found: ${cookiePath}`);
   }
 
-  const raw = JSON.parse(fs.readFileSync(cookiePath, 'utf8'));
-  const cookies = Array.isArray(raw)
-    ? raw
-    : Array.isArray(raw.cookies)
-      ? raw.cookies
-      : Object.entries(raw).map(([name, value]) => ({ name, value }));
+  const raw = fs.readFileSync(cookiePath, 'utf8');
+  let cookies;
 
-  if (!Array.isArray(cookies) || cookies.length === 0) {
-    throw new Error('No cookies found in cookie file');
+  try {
+    cookies = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid cookie JSON: ${err.message}`);
   }
 
-  return cookies.filter(c => c && (c.name || c.key) && c.value != null);
+  if (!Array.isArray(cookies)) {
+    throw new TypeError('Cookie file must contain a JSON array');
+  }
+
+  return cookies;
 }
 
 function validateCookies(cookies) {
-  const names = new Set(cookies.map(c => c.name || c.key));
-  const missing = ['sessionid', 'ds_user_id'].filter(name => !names.has(name));
+  if (!Array.isArray(cookies) || cookies.length === 0) {
+    throw new Error('No cookies found');
+  }
 
-  if (missing.length) {
-    throw new Error(`Required Instagram cookies missing: ${missing.join(', ')}`);
+  const names = new Set();
+  for (const cookie of cookies) {
+    if (!cookie || typeof cookie !== 'object') {
+      throw new TypeError('Each cookie must be an object');
+    }
+    if (typeof cookie.name !== 'string' || !cookie.name.trim()) {
+      throw new TypeError('Cookie name is missing');
+    }
+    if (typeof cookie.value !== 'string') {
+      throw new TypeError(`Cookie value is invalid for ${cookie.name}`);
+    }
+    names.add(cookie.name);
+  }
+
+  if (!names.has('sessionid')) {
+    throw new Error('Required Instagram cookie "sessionid" is missing');
+  }
+  if (!names.has('ds_user_id')) {
+    throw new Error('Required Instagram cookie "ds_user_id" is missing');
   }
 
   return true;
 }
 
-function getCookieValue(cookies, name) {
-  const cookie = cookies.find(c => (c.name || c.key) === name);
-  return cookie ? String(cookie.value) : null;
+function cookieToString(cookie) {
+  let value = `${cookie.name}=${cookie.value}`;
+
+  if (cookie.path) value += `; Path=${cookie.path}`;
+  if (cookie.domain) value += `; Domain=${cookie.domain}`;
+  if (cookie.secure) value += '; Secure';
+  if (cookie.httpOnly) value += '; HttpOnly';
+
+  return value;
 }
 
-function cookieUrl(cookie) {
-  const domain = String(cookie.domain || 'www.instagram.com').replace(/^\./, '');
-  return `https://${domain}/`;
-}
-
-function applyCookiesToClient(ig, cookies) {
+async function applyCookiesToClient(ig, cookies) {
   if (!ig || !ig.state || !ig.state.cookieJar) {
     throw new Error('Instagram client cookie jar is unavailable');
   }
 
-  const seed = getCookieValue(cookies, 'ds_user_id') || getCookieValue(cookies, 'sessionid');
-  if (typeof ig.state.generateDevice === 'function') {
-    ig.state.generateDevice(seed || 'instagram-bot');
-  }
+  const jar = ig.state.cookieJar;
+  const url = 'https://www.instagram.com/';
 
-  let applied = 0;
+  for (const item of cookies) {
+    const cookieString = cookieToString(item);
+    const parsed = Cookie.parse(cookieString);
 
-  for (const source of cookies) {
-    const name = source.name || source.key;
-    if (!name || source.value == null) continue;
-
-    const cookie = new Cookie({
-      key: name,
-      value: String(source.value),
-      domain: source.domain || '.instagram.com',
-      path: source.path || '/',
-      secure: source.secure !== false,
-      httpOnly: Boolean(source.httpOnly),
-      expires: source.expirationDate
-        ? new Date(Number(source.expirationDate) * 1000)
-        : 'Infinity'
-    });
-
-    const url = cookieUrl(source);
-    ig.state.cookieJar.setCookieSync(cookie, url);
-
-    // Browser exports can contain host-specific cookies. Mirror the important
-    // Instagram auth cookies to the mobile API host as well.
-    if (['sessionid', 'ds_user_id', 'csrftoken', 'mid', 'ig_did', 'rur'].includes(name)) {
-      try {
-        ig.state.cookieJar.setCookieSync(cookie, 'https://i.instagram.com/');
-      } catch (_) {
-        // The original cookie is already installed; a host mismatch here is harmless.
-      }
+    if (!parsed) {
+      throw new Error(`Unable to parse cookie: ${item.name}`);
     }
 
-    applied++;
+    // tough-cookie requires a Cookie instance or a cookie string here.
+    // Passing the browser-exported plain object directly causes:
+    // "First argument to setCookie must be a Cookie object or string".
+    await jar.setCookie(parsed, url);
   }
 
-  if (!applied) {
-    throw new Error('No valid cookies were applied');
-  }
+  const dsUserId = getCookieValue(ig, 'ds_user_id');
+  return { dsUserId };
+}
 
-  return {
-    dsUserId: getCookieValue(cookies, 'ds_user_id') || ig.state.cookieUserId,
-    sessionId: getCookieValue(cookies, 'sessionid')
-  };
+function getCookieValue(ig, name) {
+  if (!ig || !ig.state || !ig.state.cookieJar) return null;
+
+  try {
+    const cookies = ig.state.cookieJar.getCookiesSync('https://www.instagram.com/');
+    const found = cookies.find(cookie => cookie.key === name);
+    return found ? found.value : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 async function validateCookieSession(ig) {
   try {
-    const userId = String(ig.state.cookieUserId || '');
+    const user = await ig.account.currentUser();
+    const data = user && user.user ? user.user : user;
+
+    const userId = String(
+      data?.pk ??
+      data?.id ??
+      getCookieValue(ig, 'ds_user_id') ??
+      ''
+    );
+
+    const username = data?.username || getCookieValue(ig, 'ds_user') || '';
+
     if (!userId) {
-      return { valid: false, error: 'ds_user_id cookie is unavailable' };
-    }
-
-    let userInfo = null;
-    try {
-      userInfo = await ig.account.currentUser();
-    } catch (_) {
-      userInfo = null;
-    }
-
-    const username = userInfo?.username || ig.state.cookieUsername || null;
-    const resolvedUserId = String(userInfo?.pk || userId);
-
-    if (!username) {
-      return {
-        valid: false,
-        error: 'Instagram accepted the cookies but current user information could not be resolved',
-        userId: resolvedUserId
-      };
+      return { valid: false, error: 'Instagram did not return an authenticated user ID' };
     }
 
     return {
       valid: true,
       username,
-      userId: resolvedUserId,
-      fullName: userInfo?.full_name || null
+      userId,
+      user: data
     };
-  } catch (error) {
-    return { valid: false, error: error.message };
+  } catch (err) {
+    return {
+      valid: false,
+      error: err?.message || String(err)
+    };
   }
 }
 
