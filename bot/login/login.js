@@ -146,10 +146,6 @@ async function login() {
   }
 
   if (!sessionLoaded) {
-    if (!process.stdin.isTTY) {
-      throw new Error('Cookie authentication failed and interactive login is unavailable in this environment. Provide a valid cookie.json or IG_EMAIL/IG_PASSWORD secrets.');
-    }
-
     console.log();
     console.log(colors.cyan('━'.repeat(60)));
     console.log(colors.cyanBright.bold('  Login Required'));
