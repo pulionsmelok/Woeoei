@@ -1,27 +1,26 @@
 'use strict';
 
 const fs = require('fs');
-const { Cookie } = require('tough-cookie');
 
 function loadBrowserCookies(cookiePath) {
   if (!fs.existsSync(cookiePath)) {
     throw new Error(`Cookie file not found: ${cookiePath}`);
   }
 
-  const raw = fs.readFileSync(cookiePath, 'utf8');
   let cookies;
-
   try {
-    cookies = JSON.parse(raw);
+    cookies = JSON.parse(fs.readFileSync(cookiePath, 'utf8'));
   } catch (err) {
     throw new Error(`Invalid cookie JSON: ${err.message}`);
   }
 
-  if (!Array.isArray(cookies)) {
-    throw new TypeError('Cookie file must contain a JSON array');
-  }
+  // Browser exports are normally an array. Also accept a single cookie object
+  // or a { cookies: [...] } wrapper without changing the cookie values.
+  if (Array.isArray(cookies)) return cookies;
+  if (cookies && Array.isArray(cookies.cookies)) return cookies.cookies;
+  if (cookies && typeof cookies === 'object' && cookies.name) return [cookies];
 
-  return cookies;
+  throw new TypeError('Cookie file must contain a JSON cookie array');
 }
 
 function validateCookies(cookies) {
@@ -54,14 +53,20 @@ function validateCookies(cookies) {
 }
 
 function cookieToString(cookie) {
-  let value = `${cookie.name}=${cookie.value}`;
+  // IMPORTANT: instagram-bot-api has its own nested tough-cookie dependency.
+  // Passing a Cookie instance created by the project's top-level tough-cookie
+  // package can fail instanceof checks. setCookie accepts a string, so keep
+  // the value as a standard Set-Cookie string instead.
+  const name = String(cookie.name).trim();
+  const value = String(cookie.value);
+  const domain = cookie.domain || '.instagram.com';
+  const cookiePath = cookie.path || '/';
 
-  if (cookie.path) value += `; Path=${cookie.path}`;
-  if (cookie.domain) value += `; Domain=${cookie.domain}`;
-  if (cookie.secure) value += '; Secure';
-  if (cookie.httpOnly) value += '; HttpOnly';
+  let result = `${name}=${value}; Domain=${domain}; Path=${cookiePath}`;
+  if (cookie.secure) result += '; Secure';
+  if (cookie.httpOnly) result += '; HttpOnly';
 
-  return value;
+  return result;
 }
 
 async function applyCookiesToClient(ig, cookies) {
@@ -72,34 +77,54 @@ async function applyCookiesToClient(ig, cookies) {
   const jar = ig.state.cookieJar;
   const url = 'https://www.instagram.com/';
 
+  if (typeof jar.setCookie !== 'function') {
+    throw new Error('Instagram client cookie jar does not support setCookie');
+  }
+
   for (const item of cookies) {
     const cookieString = cookieToString(item);
-    const parsed = Cookie.parse(cookieString);
-
-    if (!parsed) {
-      throw new Error(`Unable to parse cookie: ${item.name}`);
+    try {
+      // Pass a STRING, not a Cookie object. This works with the nested
+      // tough-cookie version used internally by instagram-bot-api.
+      if (jar.setCookie.length >= 3) {
+        await new Promise((resolve, reject) => {
+          jar.setCookie(cookieString, url, (err) => err ? reject(err) : resolve());
+        });
+      } else {
+        await jar.setCookie(cookieString, url);
+      }
+    } catch (err) {
+      throw new Error(`Unable to apply cookie "${item.name}": ${err.message}`);
     }
-
-    // tough-cookie requires a Cookie instance or a cookie string here.
-    // Passing the browser-exported plain object directly causes:
-    // "First argument to setCookie must be a Cookie object or string".
-    await jar.setCookie(parsed, url);
   }
 
   const dsUserId = getCookieValue(ig, 'ds_user_id');
+  if (!dsUserId) {
+    throw new Error('ds_user_id cookie was not stored in the Instagram session');
+  }
+
   return { dsUserId };
 }
 
 function getCookieValue(ig, name) {
   if (!ig || !ig.state || !ig.state.cookieJar) return null;
 
-  try {
-    const cookies = ig.state.cookieJar.getCookiesSync('https://www.instagram.com/');
-    const found = cookies.find(cookie => cookie.key === name);
-    return found ? found.value : null;
-  } catch (_) {
-    return null;
+  const urls = [
+    'https://www.instagram.com/',
+    'https://i.instagram.com/'
+  ];
+
+  for (const url of urls) {
+    try {
+      if (typeof ig.state.cookieJar.getCookiesSync === 'function') {
+        const cookies = ig.state.cookieJar.getCookiesSync(url);
+        const found = cookies.find(cookie => (cookie.key || cookie.name) === name);
+        if (found) return found.value;
+      }
+    } catch (_) {}
   }
+
+  return null;
 }
 
 async function validateCookieSession(ig) {
@@ -117,7 +142,10 @@ async function validateCookieSession(ig) {
     const username = data?.username || getCookieValue(ig, 'ds_user') || '';
 
     if (!userId) {
-      return { valid: false, error: 'Instagram did not return an authenticated user ID' };
+      return {
+        valid: false,
+        error: 'Instagram did not return an authenticated user ID'
+      };
     }
 
     return {
