@@ -180,17 +180,38 @@ async function handleMessage(data) {
   const config = global.ST.config;
   const prefix = config.prefix || '/';
 
-  const senderID = data.userId || data.user_id || data.from_user_id;
-  const threadID = data.thread_id || data.threadId;
-  const messageID = data.id || data.item_id || data.message_id;
-  const body = data.text || data.body || (data.message_data && data.message_data.body) || '';
-  const username = data.username || data.from_username || `user_${senderID}`;
-  const itemType = data.itemType || data.item_type || 'text';
+  // instagram-bot-api can emit a raw `{ message, thread }` payload or a
+  // normalized `message_live` object. Normalize both forms here.
+  if (data?.parsed && typeof data.parsed === 'object') {
+    data = data.parsed;
+  }
+  if (data?.message && typeof data.message === 'object') {
+    const rawMessage = data.message;
+    const thread = data.thread || {};
+    data = {
+      ...data,
+      ...rawMessage,
+      thread_id: rawMessage.thread_id || data.thread_id || data.threadId || thread.thread_id || thread.id,
+      userId: rawMessage.user_id || rawMessage.userId || rawMessage.from_user_id || data.userId || data.user_id || data.from_user_id,
+      text: rawMessage.text || rawMessage.body || data.text || data.body || '',
+      id: rawMessage.item_id || rawMessage.id || data.id || data.item_id || data.message_id
+    };
+  }
 
-  if (!senderID || !threadID) return;
+  const senderID = data.userId || data.user_id || data.from_user_id || data.senderID || data.sender_id;
+  const threadID = data.thread_id || data.threadId || data.thread?.thread_id || data.thread?.id;
+  const messageID = data.id || data.item_id || data.message_id || data.messageID;
+  const body = data.text || data.body || data.message_data?.body || data.message_data?.text || data.item?.text || '';
+  const username = data.username || data.from_username || data.sender?.username || `user_${senderID || 'unknown'}`;
+  const itemType = data.itemType || data.item_type || data.item?.item_type || 'text';
+
+  if (!senderID || !threadID) {
+    log.warn('MESSAGE', `Ignored message with missing sender/thread: ${JSON.stringify({ senderID, threadID, messageID })}`);
+    return;
+  }
 
   const botUserId = global.ST.client?.state?.cookieUserId;
-  if (senderID === botUserId) return;
+  if (botUserId && String(senderID) === String(botUserId)) return;
 
   // Detect if this is a group thread (best-effort)
   // Instagram group thread IDs are typically very long (19+ digits)
@@ -259,9 +280,7 @@ async function handleMessage(data) {
     reaction: data.reaction || null
   };
 
-  // MessageAPI needs the realtime command surface when MQTT is available,
-  // but it can fall back to the normal Instagram direct API when MQTT is down.
-  const message = new MessageAPI(threadID, global.ST.realtime || global.ST.api, global.ST.client);
+  const message = new MessageAPI(threadID, global.ST.realtime, global.ST.client);
 
   const api = global.ST.api;
 
@@ -479,7 +498,7 @@ async function handleThreadEvent(data) {
     const welcomeEvent = global.ST.events.get('welcome');
     if (welcomeEvent && welcomeEvent.onEvent) {
       try {
-        const message = new MessageAPI(data.thread_id, global.ST.realtime || global.ST.api, global.ST.client);
+        const message = new MessageAPI(data.thread_id, global.ST.api, global.ST.client);
         data.type = data.type || 'action_log';
         await welcomeEvent.onEvent({ message, event: data, api: global.ST.api });
       } catch (e) {
@@ -492,7 +511,7 @@ async function handleThreadEvent(data) {
     const leaveEvent = global.ST.events.get('leave');
     if (leaveEvent && leaveEvent.onEvent) {
       try {
-        const message = new MessageAPI(data.thread_id, global.ST.realtime || global.ST.api, global.ST.client);
+        const message = new MessageAPI(data.thread_id, global.ST.api, global.ST.client);
         data.type = data.type || 'action_log';
         await leaveEvent.onEvent({ message, event: data, api: global.ST.api });
       } catch (e) {
