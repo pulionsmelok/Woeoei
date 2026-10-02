@@ -259,7 +259,9 @@ async function handleMessage(data) {
     reaction: data.reaction || null
   };
 
-  const message = new MessageAPI(threadID, global.ST.realtime, global.ST.client);
+  // MessageAPI needs the realtime command surface when MQTT is available,
+  // but it can fall back to the normal Instagram direct API when MQTT is down.
+  const message = new MessageAPI(threadID, global.ST.realtime || global.ST.api, global.ST.client);
 
   const api = global.ST.api;
 
@@ -477,7 +479,7 @@ async function handleThreadEvent(data) {
     const welcomeEvent = global.ST.events.get('welcome');
     if (welcomeEvent && welcomeEvent.onEvent) {
       try {
-        const message = new MessageAPI(data.thread_id, global.ST.api, global.ST.client);
+        const message = new MessageAPI(data.thread_id, global.ST.realtime || global.ST.api, global.ST.client);
         data.type = data.type || 'action_log';
         await welcomeEvent.onEvent({ message, event: data, api: global.ST.api });
       } catch (e) {
@@ -490,7 +492,7 @@ async function handleThreadEvent(data) {
     const leaveEvent = global.ST.events.get('leave');
     if (leaveEvent && leaveEvent.onEvent) {
       try {
-        const message = new MessageAPI(data.thread_id, global.ST.api, global.ST.client);
+        const message = new MessageAPI(data.thread_id, global.ST.realtime || global.ST.api, global.ST.client);
         data.type = data.type || 'action_log';
         await leaveEvent.onEvent({ message, event: data, api: global.ST.api });
       } catch (e) {
