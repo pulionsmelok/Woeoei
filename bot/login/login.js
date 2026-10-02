@@ -116,6 +116,13 @@ async function login() {
   const useCookieAuth = config.cookieAuth?.enabled === true;
 
   const ig = new IgApiClient();
+
+  // The Instagram client needs a generated device before cookie/session
+  // authentication and realtime MQTT are initialized.
+  if (typeof ig.state?.generateDevice === 'function') {
+    const deviceSeed = process.env.IG_USERNAME || config.credentials?.email || 'instagram-bot';
+    ig.state.generateDevice(deviceSeed);
+  }
   let email = process.env.IG_EMAIL || config.credentials?.email || '';
   let password = process.env.IG_PASSWORD || config.credentials?.password || '';
 
@@ -221,12 +228,24 @@ async function login() {
   let userInfo = {};
   try {
     userInfo = await ig.account.currentUser();
-    console.log(`  ${colors.green('Username:')} ${colors.white('@' + userInfo.username)}`);
-    console.log(`  ${colors.green('User ID:')} ${colors.gray(userInfo.pk)}`);
-    console.log(`  ${colors.green('Full Name:')} ${colors.white(userInfo.full_name || 'N/A')}`);
   } catch (e) {
-    console.log(`  ${colors.yellow('Could not fetch user info')}`);
+    userInfo = {};
   }
+
+  const stateUserId = (() => {
+    try { return ig.state.cookieUserId; } catch (_) { return null; }
+  })();
+  const stateUsername = (() => {
+    try { return ig.state.cookieUsername; } catch (_) { return null; }
+  })();
+
+  const displayUsername = userInfo?.username || stateUsername || 'unknown';
+  const displayUserId = userInfo?.pk || stateUserId || 'unknown';
+  const displayFullName = userInfo?.full_name || 'N/A';
+
+  console.log(`  ${colors.green('Username:')} ${colors.white('@' + displayUsername)}`);
+  console.log(`  ${colors.green('User ID:')} ${colors.gray(displayUserId)}`);
+  console.log(`  ${colors.green('Full Name:')} ${colors.white(displayFullName)}`);
 
   console.log();
   console.log(colors.cyan('━'.repeat(60)));
@@ -248,28 +267,44 @@ async function login() {
   let realtime = null;
   try {
     realtime = new RealtimeClient(ig);
-    await realtime.connect();
+
+    // startRealTimeListener() performs the inbox/IRIS bootstrap before MQTT.
+    // That is more reliable than opening a bare MQTT connection for this bot.
+    if (typeof realtime.startRealTimeListener === 'function') {
+      await realtime.startRealTimeListener();
+    } else {
+      await realtime.connect();
+    }
+
     console.log(`${colors.green('✓')} ${colors.greenBright('Realtime connected!')}`);
   } catch (e) {
     console.log(`${colors.yellow('!')} ${colors.yellowBright('Realtime connection warning: ' + e.message)}`);
+    realtime = null;
   }
 
   console.log();
 
   const api = {
     direct: ig.direct,
+    directCommands: realtime?.directCommands || null,
+    realtime,
     user: ig.user,
     account: ig.account,
     media: ig.media,
     dm: ig.dm,
     sendText: async (threadId, text) => {
+      if (realtime?.directCommands?.sendTextViaRealtime) {
+        return await realtime.directCommands.sendTextViaRealtime(threadId, text);
+      }
       return await ig.direct.sendText(threadId, text);
     },
     getUserInfo: async (userId) => {
       return await ig.user.info(userId);
     },
     getThreadInfo: async (threadId) => {
-      return await ig.directThread.getThread(threadId);
+      if (ig.directThread?.getThread) return await ig.directThread.getThread(threadId);
+      if (ig.direct?.getThread) return await ig.direct.getThread(threadId);
+      throw new Error('Instagram direct thread API is unavailable');
     }
   };
 
