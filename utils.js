@@ -6,8 +6,24 @@ const os = require('os');
 class MessageAPI {
   constructor(threadId, api, client) {
     this.threadId = threadId;
-    this.api = api;
-    this.client = client;
+    this.api = api || null;
+    this.client = client || global.ST?.client || null;
+  }
+
+  async _sendText(threadId, text) {
+    if (!threadId) throw new Error('No thread ID available');
+    if (text == null) throw new Error('No text provided');
+
+    const directCommands = this.api?.directCommands;
+    if (directCommands && typeof directCommands.sendTextViaRealtime === 'function') {
+      return await directCommands.sendTextViaRealtime(threadId, String(text));
+    }
+
+    if (this.client?.direct && typeof this.client.direct.sendText === 'function') {
+      return await this.client.direct.sendText(threadId, String(text));
+    }
+
+    throw new Error('No Instagram text-message transport is available');
   }
 
   async edit(messageId, newText) {
@@ -33,7 +49,7 @@ class MessageAPI {
       }
 
       if (typeof content === 'string') {
-        const result = await this.api.directCommands.sendTextViaRealtime(this.threadId, content);
+        const result = await this._sendText(this.threadId, content);
         return {
           messageID: result?.item_id || result?.message_id || Date.now().toString(),
           threadID: this.threadId,
@@ -49,7 +65,7 @@ class MessageAPI {
           let lastResult = null;
 
           if (body) {
-            await this.api.directCommands.sendTextViaRealtime(this.threadId, body);
+            await this._sendText(this.threadId, body);
           }
 
           for (const att of attachments) {
@@ -94,7 +110,7 @@ class MessageAPI {
         }
 
         if (body) {
-          const result = await this.api.directCommands.sendTextViaRealtime(this.threadId, body);
+          const result = await this._sendText(this.threadId, body);
           return {
             messageID: result?.item_id || result?.message_id || Date.now().toString(),
             threadID: this.threadId,
@@ -112,7 +128,7 @@ class MessageAPI {
 
   async send(text, threadId = this.threadId) {
     try {
-      const result = await this.api.directCommands.sendTextViaRealtime(threadId, text);
+      const result = await this._sendText(threadId, text);
       return {
         messageID: result?.item_id || result?.message_id || Date.now().toString(),
         threadID: threadId,
