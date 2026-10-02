@@ -65,7 +65,7 @@ class MessageAPI {
           let lastResult = null;
 
           if (body) {
-            await this._sendText(this.threadId, body);
+            await this.api.directCommands.sendTextViaRealtime(this.threadId, body);
           }
 
           for (const att of attachments) {
@@ -110,7 +110,7 @@ class MessageAPI {
         }
 
         if (body) {
-          const result = await this._sendText(this.threadId, body);
+          const result = await this.api.directCommands.sendTextViaRealtime(this.threadId, body);
           return {
             messageID: result?.item_id || result?.message_id || Date.now().toString(),
             threadID: this.threadId,
@@ -128,7 +128,7 @@ class MessageAPI {
 
   async send(text, threadId = this.threadId) {
     try {
-      const result = await this._sendText(threadId, text);
+      const result = await this.api.directCommands.sendTextViaRealtime(threadId, text);
       return {
         messageID: result?.item_id || result?.message_id || Date.now().toString(),
         threadID: threadId,

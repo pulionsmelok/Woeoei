@@ -57,34 +57,64 @@ async function main() {
     const { handleMessage } = require('./bot/handler/handlerEvents.js');
     
     if (realtime) {
-      realtime.on('message_live', async (data) => {
+      const seenMessages = new Map();
+      const rememberMessage = (data) => {
+        const msg = data?.message || data?.parsed || data;
+        const id = msg?.id || msg?.item_id || msg?.message_id || msg?.message?.item_id;
+        const thread = msg?.thread_id || msg?.threadId || msg?.thread?.thread_id || '';
+        const sender = msg?.userId || msg?.user_id || msg?.from_user_id || msg?.message?.user_id || '';
+        const key = id ? String(id) : `${thread}:${sender}:${msg?.text || msg?.body || ''}`;
+        const now = Date.now();
+        const previous = seenMessages.get(key);
+        if (previous && now - previous < 15000) return false;
+        seenMessages.set(key, now);
+        if (seenMessages.size > 1000) {
+          for (const [k, t] of seenMessages) {
+            if (now - t > 30000) seenMessages.delete(k);
+          }
+        }
+        return true;
+      };
+
+      const dispatchMessage = async (data) => {
+        if (!rememberMessage(data)) return;
         try {
           await handleMessage(data);
         } catch (err) {
-          log.error('MESSAGE', err.message);
+          log.error('MESSAGE', err?.stack || err?.message || String(err));
         }
+      };
+
+      // The library exposes both the raw `message` event and the normalized
+      // `message_live` event. Accept both so changes in the library do not
+      // silently stop command processing. The dedupe above prevents doubles.
+      realtime.on('message_live', dispatchMessage);
+      realtime.on('message', dispatchMessage);
+      realtime.on('iris', dispatchMessage);
+
+      realtime.on('error', (err) => {
+        log.error('REALTIME', err?.stack || err?.message || String(err));
       });
 
-      // Some library versions expose the raw public event as `message` only.
-      // The current package's internal handler converts it to `message_live`,
-      // so do not bind `message` here and process the same message twice.
-      
-      realtime.on('error', (err) => {
-        log.error('REALTIME', err.message);
-      });
-      
+      const reconnect = async () => {
+        try {
+          await realtime.connect({
+            graphQlSubs: ['ig_sub_direct', 'ig_sub_direct_v2_message_create'],
+            skywalkerSubs: ['presence_subscribe', 'typing_subscribe']
+          });
+          log.success('REALTIME', 'Reconnected successfully');
+        } catch (e) {
+          log.error('REALTIME', 'Reconnect failed: ' + e.message);
+          if (config.options.autoReconnect) {
+            setTimeout(reconnect, config.options.reconnectDelay || 5000);
+          }
+        }
+      };
+
       realtime.on('disconnect', () => {
         log.warn('REALTIME', 'Disconnected from Instagram');
         if (config.options.autoReconnect) {
-          setTimeout(async () => {
-            log.info('REALTIME', 'Attempting to reconnect...');
-            try {
-              await realtime.connect();
-              log.success('REALTIME', 'Reconnected successfully');
-            } catch (e) {
-              log.error('REALTIME', 'Reconnect failed: ' + e.message);
-            }
-          }, config.options.reconnectDelay || 5000);
+          setTimeout(reconnect, config.options.reconnectDelay || 5000);
         }
       });
     }
